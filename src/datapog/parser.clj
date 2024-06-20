@@ -168,7 +168,7 @@
   (identity state))
 
 (defn parse-program [body]
-  (loop [program {:rules []} text body]
+  (loop [program {:rules [] :preds {}} text body]
    (let [[state text] (start nil text {})
          program (cond
                    (some? (::rel-name state))
@@ -176,10 +176,16 @@
                              [:relations (::rel-name state)]
                              (::rel-args state))
                    (some? (::fact state))
-                   (assoc-in program [:facts (-> state ::fact :pred)]
-                             (-> state ::fact :terms))
+                   (update-in program [:facts (-> state ::fact :pred)]
+                              #(conj (if (nil? %) [] %) (-> state ::fact :terms)))
                    (some? (::rule-head state))
-                   (update program :rules conj [(::rule-head state) (::rule-body state)]))]
+                   (-> program
+                       (update :rules conj {:head (::rule-head state)
+                                            :body (::rule-body state)})
+                       (update :preds assoc (-> state ::rule-head :pred) (-> state ::rule-head :terms))
+                       (update-in [:deps (-> state ::rule-head :pred)]
+                                  #(conj (if (nil? %) [] %)
+                                         (mapv :pred (-> state ::rule-body))))))]
      (if (and text (> (.length text) 0))
        (recur program text)
        program)))
