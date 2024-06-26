@@ -47,8 +47,9 @@
           (f %))
        l))
 
-(defn- replace-syms [syms xform]
+(defn- replace-syms
   "Recursively go through an xform, replacing symbols using the given lookup map"
+  [syms xform]
   (crawl #(or (get syms (if (symbol? %)
                           (-> % name symbol)
                           %))
@@ -68,11 +69,11 @@
          (some? dash) {:type t-dash}
          (some? dot) {:type t-dot}
          (some? word) {:type t-word :val word}
-         (some? number) {:type t-number :val number}
-         true (if (> (.length text) 0)
-                {:type t-unknown :val whatever}
-                {:type t-eof}))
-       (if (and text match (> (.length text) (.length match)))
+         (some? number) {:type t-number :val (Integer/parseInt number)}
+         :else (if (> (.length text) 0)
+                 {:type t-unknown :val whatever}
+                 {:type t-eof}))
+       (when (and text match (> (.length text) (.length match)))
          (.substring text (.length match)))])
     [{:type t-eof}]))
 
@@ -167,27 +168,46 @@
 (defstate start {t-eof end t-decl decl t-word rule-or-fact}
   (identity state))
 
+(defn- save-pred-terms-from-rule [program {::keys [rule-head rule-body]}]
+  (let [check (fn [pred old-terms new-terms]
+                (cond
+                  (and (some? old-terms)
+                       (= (count new-terms) (count old-terms))) new-terms
+                  (nil? old-terms) new-terms
+                  :else (throw (Exception. (str "Inconsistent arity " new-terms "for " pred)))))]
+    (reduce
+     (fn [program {:keys [pred terms]}]
+       (if (contains? (:relations program) pred)
+         (do
+           (check pred (get-in program [:relations pred]) terms)
+           program)
+         (assoc-in program [:preds pred]
+                   (check pred (get-in program [:preds pred]) terms))))
+     program
+     (conj rule-body rule-head))))
+
 (defn parse-program [body]
   (loop [program {:rules [] :preds {}} text body]
-   (let [[state text] (start nil text {})
-         program (cond
-                   (some? (::rel-name state))
-                   (assoc-in program
-                             [:relations (::rel-name state)]
-                             (::rel-args state))
-                   (some? (::fact state))
-                   (update-in program [:facts (-> state ::fact :pred)]
-                              #(conj (if (nil? %) [] %) (-> state ::fact :terms)))
-                   (some? (::rule-head state))
-                   (-> program
-                       (update :rules conj {:head (::rule-head state)
-                                            :body (::rule-body state)})
-                       (update :preds assoc (-> state ::rule-head :pred) (-> state ::rule-head :terms))
-                       (update-in [:deps (-> state ::rule-head :pred)]
-                                  #(conj (if (nil? %) [] %)
-                                         (mapv :pred (-> state ::rule-body))))))]
-     (if (and text (> (.length text) 0))
-       (recur program text)
-       program)))
-  ;(start nil body {})
+    (let [[state text] (start nil text {})
+          program (cond
+                    (some? (::rel-name state))
+                    (assoc-in program
+                              [:relations (::rel-name state)]
+                              (::rel-args state))
+                    (some? (::fact state))
+                    (update-in program [:facts (-> state ::fact :pred)]
+                               #(conj (if (nil? %) [] %) (-> state ::fact :terms)))
+                    (some? (::rule-head state))
+                    (save-pred-terms-from-rule
+                     (-> program
+                         (update :rules conj {:head (::rule-head state)
+                                              :body (::rule-body state)})
+                         (update-in [:deps (-> state ::rule-head :pred)]
+                                    #(conj (if (nil? %) [] %)
+                                           (mapv :pred (-> state ::rule-body)))))
+                     state))]
+      (if (and text (> (.length text) 0))
+        (recur program text)
+        program)))
+                                        ;(start nil body {})
   )
