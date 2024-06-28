@@ -19,6 +19,18 @@
 
 (def t-number ::number)
 
+(def t-lte ::lte)
+
+(def t-gte ::gte)
+
+(def t-eq ::eq)
+
+(def t-lt ::lt)
+
+(def t-gt ::gt)
+
+(def t-literal ::literal)
+
 (def t-unknown ::unknown)
 
 (def t-eof ::eof)
@@ -36,6 +48,11 @@
 (declare rule-body)
 
 (declare term)
+
+(declare atom-start)
+
+(def ^:private token->term-type
+  {t-word :var t-literal :string t-number :number})
 
 (defn- crawl
   [f l]
@@ -58,9 +75,10 @@
 (defn- next-token [text]
   (if text
     (let [text (.trim text)
-          [match decl open-paren close-paren colon dash dot comma word number whatever]
-          (re-find #"(.decl)|(\()|(\))|(:)|(-)|(\.)|(,)|([a-zA-Z]+)|([0-9]+)|(.*)" text)]
+          [match literal decl open-paren close-paren colon dash dot comma word number lte gte eq gt lt whatever]
+          (re-find #"('[^']+')|(.decl)|(\()|(\))|(:)|(-)|(\.)|(,)|([a-zA-Z]+)|([0-9]+)|(<=)|(>=)|(=)|(>)|(<)|(.*)" text)]
       [(cond
+         (some? literal) {:type t-literal :val (subs literal 1 (dec (.length literal)))}
          (some? decl) {:type t-decl}
          (some? open-paren) {:type t-open-paren}
          (some? close-paren) {:type t-close-paren}
@@ -69,6 +87,11 @@
          (some? dash) {:type t-dash}
          (some? dot) {:type t-dot}
          (some? word) {:type t-word :val word}
+         (some? lte) {:type t-lte :val :lte}
+         (some? gte) {:type t-gte :val :gte}
+         (some? eq) {:type t-eq :val :eq}
+         (some? gt) {:type t-gt :val :gt}
+         (some? lt) {:type t-lt :val :lt}
          (some? number) {:type t-number :val (Integer/parseInt number)}
          :else (if (> (.length text) 0)
                  {:type t-unknown :val whatever}
@@ -90,11 +113,15 @@
                                         data#
                                         [data# ~text-sym])
                [next-token# new-text#] (next-token ~text-sym)]
-           (if-let [next-parser# (or (get ~dispatch-map (:type next-token#))
-                                     (get ~dispatch-map epsilon))]
+           (if-let [[next-parser# is-epsilon?#]
+                    (if (contains? ~dispatch-map (:type next-token#))
+                      [(get ~dispatch-map (:type next-token#)) false]
+                      [(get ~dispatch-map epsilon) true])]
              (if (= next-parser# end)
                [new-state# ~text-sym]
-               (next-parser# next-token# new-text# new-state#))
+               (if is-epsilon?#
+                 (next-parser# ~token-sym ~text-sym new-state#)
+                 (next-parser# next-token# new-text# new-state#)))
              (throw (Exception.
                      (str "Unexpected " next-token# " in " ~name ", expected one of "
                           (keys ~dispatch-map))))))))))
@@ -107,15 +134,29 @@
   (identity state))
 
 (defstate term* {t-comma term t-close-paren atom-end}
-  (update state :terms conj (:val token)))
+  (update state :terms conj (assoc token :type ((:type token) token->term-type))))
 
-(defstate term {t-word term* t-number term*}
+(defstate term {t-word term* t-number term* t-literal term*}
   (if (nil? (:terms state))
-      (assoc state :terms [])
-      state))
+    (assoc state :terms [])
+    state))
 
-(defstate atom-start {t-open-paren term}
-  (assoc state :pred (:val token)))
+
+(defstate comp-end {t-comma atom-start epsilon end}
+  (update state :terms conj (assoc token :type ((:type token) token->term-type))))
+
+(defstate comp-op {t-word comp-end t-literal comp-end t-number comp-end}
+  (-> state
+      (assoc :terms [(:pred state)])
+      (assoc :pred (:val token))
+      ;(dissoc :pred)
+      ))
+
+(defstate pred-atom {epsilon term}
+  (assoc state :pred (-> state :pred :val)))
+
+(defstate atom-start {t-open-paren pred-atom t-lte comp-op t-gte comp-op t-lt comp-op t-gt comp-op t-eq comp-op}
+  (assoc state :pred (assoc token :type ((:type token) token->term-type))))
 
 (defstate fact {epsilon end}
   (assoc state ::fact (::atom state)))
@@ -177,12 +218,14 @@
                   :else (throw (Exception. (str "Inconsistent arity " new-terms "for " pred)))))]
     (reduce
      (fn [program {:keys [pred terms]}]
-       (if (contains? (:relations program) pred)
-         (do
-           (check pred (get-in program [:relations pred]) terms)
-           program)
-         (assoc-in program [:preds pred]
-                   (check pred (get-in program [:preds pred]) terms))))
+       (if (some? pred)
+        (if (contains? (:relations program) pred)
+          (do
+            (check pred (get-in program [:relations pred]) terms)
+            program)
+          (assoc-in program [:preds pred]
+                    (check pred (get-in program [:preds pred]) terms)))
+        program))
      program
      (conj rule-body rule-head))))
 
@@ -196,7 +239,8 @@
                               (::rel-args state))
                     (some? (::fact state))
                     (update-in program [:facts (-> state ::fact :pred)]
-                               #(conj (if (nil? %) [] %) (-> state ::fact :terms)))
+                               #(conj (if (nil? %) [] %)
+                                      (mapv :val (-> state ::fact :terms))))
                     (some? (::rule-head state))
                     (save-pred-terms-from-rule
                      (-> program
@@ -204,8 +248,10 @@
                                               :body (::rule-body state)})
                          (update-in [:deps (-> state ::rule-head :pred)]
                                     #(conj (if (nil? %) [] %)
-                                           (mapv :pred (-> state ::rule-body)))))
-                     state))]
+                                           (into [] (comp (map :pred) (filter some?))
+                                                 (-> state ::rule-body)))))
+                     state)
+                    :else state)]
       (if (and text (> (.length text) 0))
         (recur program text)
         program)))

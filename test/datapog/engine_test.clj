@@ -28,6 +28,17 @@
                  ["as" 2]]
          (engine/eval-pred "p" prog)))))
 
+(deftest test-eval-constraints
+  (let [prog (engine/validate+compile-program
+              (parse-program
+               ".decl age(name: symbol, years: number)
+                age(young, 14).
+                age(old, 62).
+                senior(x) :- age(x, y), y > 60."))]
+    (is (match? [["old"]]
+                (engine/eval-pred "senior" prog)))))
+
+
 (deftest test-eval-rule-incr
   (let [prog (-> program
                  (engine/validate+compile-program)

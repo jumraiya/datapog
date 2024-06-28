@@ -29,18 +29,19 @@
    []
    (:rules program)))
 
-
 (defn compile-rule [{:keys [head body]}]
   (let [program (gensym)
-        pred-syms (into [] (map #(vector (:pred %) (gensym))) body)
+        pred-syms (into [] (comp (remove #(#{:eq :lte :gte :lt :gt} (:pred %))) (map #(vector (:pred %) (gensym)))) body)
         term-data (transduce
-                   (map-indexed
-                    (fn [pred-idx {:keys [_pred terms]}]
-                      (into {}
-                            (map-indexed
-                             (fn [term-idx term]
-                               (vector term-idx [term (list nth (-> pred-syms (nth pred-idx) second) term-idx)])))
-                            terms)))
+                   (comp
+                    (remove #(#{:eq :lte :gte :lt :gt} (:pred %)))
+                    (map-indexed
+                     (fn [pred-idx {:keys [_pred terms]}]
+                       (into {}
+                             (map-indexed
+                              (fn [term-idx term]
+                                (vector term-idx [term (list nth (-> pred-syms (nth pred-idx) second) term-idx)])))
+                             terms))))
                    (fn
                      ([data indices]
                       (-> data
@@ -59,14 +60,31 @@
                           (update :offset + (count indices))))
                      ([data]
                       (assoc data :constraints
-                             (reduce
-                              (fn [ret [_term positions]]
-                                (if (> (count positions) 1)
-                                  (conj ret `(= ~@(mapv #(-> data :term-paths (get %)) positions)))
-                                  ret))
-                              [] (:term-pos data)))))
+                             (transduce
+                              (comp
+                               (map
+                                (fn [[term positions]]
+                                  (case (:type term)
+                                    :var (when (> (count positions) 1)
+                                           `(= ~@(mapv #(-> data :term-paths (get %)) positions)))
+                                    (:number :string) `(= ~@(mapv #(-> data :term-paths (get %)) positions) ~(:val term)))))
+                               (filter some?))
+                              (completing conj)
+                              []
+                              (:term-pos data)))))
                    {:term-pos {} :term-paths {} :offset 0}
                    body)
+        term-data (reduce
+                   (fn [data {:keys [pred terms]}]
+                     (update data :constraints conj
+                             `(~(case pred :eq = :lte <= :gte >= :gt > :lt <)
+                               ~@(mapv #(if (= :var (:type %))
+                                          (-> data :term-paths
+                                              (get (-> (:term-pos data) (get %) first)))
+                                          (:val %))
+                                       terms))))
+                   term-data
+                   (filter #(#{:eq :lte :gte :lt :gt} (:pred %)) body))
         for-clause (-> []
                        (into
                         (comp (map #(vector `(~(second %) (get-in ~program [:facts ~(first %)])))) cat cat) pred-syms)
@@ -128,3 +146,4 @@
          (if (every? empty? (-> prog :deltas vals))
            prog
            (recur prog))))))
+
