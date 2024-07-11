@@ -22,6 +22,20 @@
            {:rules [{:head {:pred "rel", :terms [{:type :var :val "x"} {:type :var :val "y"}]}
                      :body [{:pred "a", :terms [{:type :var :val "p"}]}
                             {:pred "f", :terms [{:type :var :val "b"} {:type :var :val "d"}]}]}]}
+           prog))))
+
+  (testing "rule with disjunction"
+    (let [prog (parse-program "p(x,y) :- (a(x),c(x);b(y)).")]
+      (is (match?
+           {:rules [{:head
+                     {:pred "p",
+                      :terms [{:type :var, :val "x"} {:type :var, :val "y"}]},
+                     :body
+                     [{:pred :or,
+                       :terms
+                       [[{:pred "a", :terms [{:type :var, :val "x"}]}
+                         {:pred "c", :terms [{:type :var, :val "x"}]}]
+                        [{:pred "b", :terms [{:type :var, :val "y"}]}]]}]}]}
            prog)))))
 
 

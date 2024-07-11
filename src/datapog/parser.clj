@@ -3,9 +3,13 @@
 
 (def t-decl ::decl)
 
+(def t-bang ::bang)
+
 (def t-word ::word)
 
 (def t-colon ::colon)
+
+(def t-semicolon ::semicolon)
 
 (def t-dash ::dash)
 
@@ -47,9 +51,17 @@
 
 (declare rule-body)
 
+(declare rule-end)
+
+(declare rule-body*)
+
 (declare term)
 
 (declare atom-start)
+
+(declare disjunction)
+
+(declare disjunction*)
 
 (def ^:private token->term-type
   {t-word :var t-literal :string t-number :number})
@@ -75,10 +87,12 @@
 (defn- next-token [text]
   (if text
     (let [text (.trim text)
-          [match literal decl open-paren close-paren colon dash dot comma word number lte gte eq gt lt whatever]
-          (re-find #"('[^']+')|(.decl)|(\()|(\))|(:)|(-)|(\.)|(,)|([a-zA-Z]+)|([0-9]+)|(<=)|(>=)|(=)|(>)|(<)|(.*)" text)]
+          [match literal decl bang semicolon open-paren close-paren colon dash dot comma word number lte gte eq gt lt whatever]
+          (re-find #"('[^']+')|(.decl)|(!)|(;)|(\()|(\))|(:)|(-)|(\.)|(,)|([a-zA-Z]+)|([0-9]+)|(<=)|(>=)|(=)|(>)|(<)|(.*)" text)]
       [(cond
          (some? literal) {:type t-literal :val (subs literal 1 (dec (.length literal)))}
+         (some? bang) {:type t-bang}
+         (some? semicolon) {:type t-semicolon}
          (some? decl) {:type t-decl}
          (some? open-paren) {:type t-open-paren}
          (some? close-paren) {:type t-close-paren}
@@ -117,14 +131,15 @@
                     (if (contains? ~dispatch-map (:type next-token#))
                       [(get ~dispatch-map (:type next-token#)) false]
                       [(get ~dispatch-map epsilon) true])]
-             (if (= next-parser# end)
-               [new-state# ~text-sym]
-               (if is-epsilon?#
-                 (next-parser# ~token-sym ~text-sym new-state#)
-                 (next-parser# next-token# new-text# new-state#)))
-             (throw (Exception.
-                     (str "Unexpected " next-token# " in " ~name ", expected one of "
-                          (keys ~dispatch-map))))))))))
+             (if next-parser#
+               (if (= next-parser# end)
+                 [new-state# ~text-sym]
+                 (if is-epsilon?#
+                   (next-parser# ~token-sym ~text-sym new-state#)
+                   (next-parser# next-token# new-text# new-state#)))
+               (throw (Exception.
+                       (str "Unexpected " next-token# " in " ~name ", expected one of "
+                            (keys ~dispatch-map)))))))))))
 
 
 
@@ -142,7 +157,7 @@
     state))
 
 
-(defstate comp-end {t-comma atom-start epsilon end}
+(defstate comp-end {epsilon end}
   (update state :terms conj (assoc token :type ((:type token) token->term-type))))
 
 (defstate comp-op {t-word comp-end t-literal comp-end t-number comp-end}
@@ -155,23 +170,43 @@
 (defstate pred-atom {epsilon term}
   (assoc state :pred (-> state :pred :val)))
 
-(defstate atom-start {t-open-paren pred-atom t-lte comp-op t-gte comp-op t-lt comp-op t-gt comp-op t-eq comp-op}
+(defstate atom-start* {t-open-paren pred-atom t-lte comp-op t-gte comp-op t-lt comp-op t-gt comp-op t-eq comp-op}
   (assoc state :pred (assoc token :type ((:type token) token->term-type))))
+
+(defstate atom-start {t-word atom-start* epsilon atom-start* t-lte comp-op t-gte comp-op t-lt comp-op t-gt comp-op t-eq comp-op}
+  (cond (= t-bang (:type token)) (assoc state :negated true)
+        (= t-word (:type token)) (assoc state :pred
+                                        (assoc token :type
+                                               ((:type token) token->term-type)))
+        :else state))
 
 (defstate fact {epsilon end}
   (assoc state ::fact (::atom state)))
 
+(defstate disjunction-end {t-dot rule-end t-comma rule-body epsilon end}
+  (update state ::rule-body conj (hash-map :pred :or :terms (:terms state))))
+
+(defstate disjunction** {t-bang disjunction* t-word disjunction*}
+  (identity state))
+
+(defstate disjunction* {t-semicolon disjunction** t-close-paren disjunction-end}
+  (let [[data text] (rule-body* token text (hash-map ::rule-body []))]
+    [(update state :terms conj (::rule-body data)) text]))
+
+(defstate disjunction {t-word disjunction* t-bang disjunction*}
+  (assoc state :terms []))
+
 (defstate rule-end {epsilon end}
   (identity state))
 
-(defstate rule-body* {t-comma rule-body t-dot rule-end}
+(defstate rule-body* {t-comma rule-body t-dot rule-end epsilon end}
   (let [[a-tom text] (atom-start token text (hash-map))]
     [(update state ::rule-body conj a-tom) text]))
 
-(defstate rule-body {t-word rule-body*}
+(defstate rule-body {t-word rule-body* t-bang rule-body* t-open-paren disjunction}
   (if (nil? (::rule-body state))
-      (assoc state ::rule-body [])
-      state))
+    (assoc state ::rule-body [])
+    state))
 
 (defstate rule {t-dash rule-body}
   (assoc state ::rule-head (::atom state)))
