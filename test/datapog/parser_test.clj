@@ -17,11 +17,11 @@
            prog))))
 
   (testing "rules"
-    (let [prog (parse-program "rel(x,y) :- a(p), f(b,d).")]
+    (let [prog (parse-program "rel(x,y) :- a(p), !f(b,d).")]
       (is (match?
            {:rules [{:head {:pred "rel", :terms [{:type :var :val "x"} {:type :var :val "y"}]}
-                     :body [{:pred "a", :terms [{:type :var :val "p"}]}
-                            {:pred "f", :terms [{:type :var :val "b"} {:type :var :val "d"}]}]}]}
+                     :body [{:pred "a" :terms [{:type :var :val "p"}]}
+                            {:pred "f" :negated true :terms [{:type :var :val "b"} {:type :var :val "d"}]}]}]}
            prog))))
 
   (testing "rule with disjunction"
