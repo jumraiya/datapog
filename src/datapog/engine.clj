@@ -29,7 +29,7 @@
    []
    (:rules program)))
 
-(defn compile-rule [{:keys [head body]}]
+(defn compile-rule [program {:keys [head body]}]
   (let [program (gensym)
         pred-syms (into [] (comp (remove #(#{:eq :lte :gte :lt :gt} (:pred %))) (map #(vector (:pred %) (gensym)))) body)
         term-data (transduce
@@ -40,7 +40,10 @@
                        (into {}
                              (map-indexed
                               (fn [term-idx term]
-                                (vector term-idx [term (list nth (-> pred-syms (nth pred-idx) second) term-idx)])))
+                                (vector term-idx [term (list nth (-> pred-syms (nth pred-idx) second)
+                                                             (if (= (:type term) :named)
+                                                               -1
+                                                               term-idx))])))
                              terms))))
                    (fn
                      ([data indices]
@@ -102,7 +105,7 @@
   (transduce
    (map-indexed
     (fn [idx rule]
-      [idx (compile-rule rule)]))
+      [idx (compile-rule program rule)]))
    (completing
     (fn [pr [idx rule-fn]]
       (update-in pr [:rules idx] assoc :rule-fn rule-fn)))

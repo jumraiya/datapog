@@ -17,7 +17,7 @@
     p(x,z) :- c(x,z)."))
 
 (deftest test-compile-rule
-  (let [rule-fn (engine/compile-rule (-> program :rules first))]
+  (let [rule-fn (engine/compile-rule program (-> program :rules first))]
     (is (match?
          [["aa" 1]]
          (rule-fn program)))))

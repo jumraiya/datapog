@@ -7,11 +7,15 @@
 
 (def t-word ::word)
 
+(def t-alnum ::alnum)
+
 (def t-colon ::colon)
 
 (def t-semicolon ::semicolon)
 
 (def t-dash ::dash)
+
+(def t-underscore ::underscore)
 
 (def t-comma ::comma)
 
@@ -64,7 +68,7 @@
 (declare disjunction*)
 
 (def ^:private token->term-type
-  {t-word :var t-literal :string t-number :number})
+  {t-word :var t-alnum :var t-literal :string t-number :number t-underscore :ignore})
 
 (defn- crawl
   [f l]
@@ -87,8 +91,8 @@
 (defn- next-token [text]
   (if text
     (let [text (.trim text)
-          [match literal decl bang semicolon open-paren close-paren colon dash dot comma word number lte gte eq gt lt whatever]
-          (re-find #"('[^']+')|(.decl)|(!)|(;)|(\()|(\))|(:)|(-)|(\.)|(,)|([a-zA-Z]+)|([0-9]+)|(<=)|(>=)|(=)|(>)|(<)|(.*)" text)]
+          [match literal decl bang semicolon open-paren close-paren colon underscore dash dot comma alnum word number lte gte eq gt lt whatever]
+          (re-find #"('[^']+')|(.decl)|(!)|(;)|(\()|(\))|(:)|(_)|(-)|(\.)|(,)|([a-zA-Z]+[0-9]+)|([a-zA-Z]+)|([0-9]+)|(<=)|(>=)|(=)|(>)|(<)|(.*)" text)]
       [(cond
          (some? literal) {:type t-literal :val (subs literal 1 (dec (.length literal)))}
          (some? bang) {:type t-bang}
@@ -97,7 +101,9 @@
          (some? open-paren) {:type t-open-paren}
          (some? close-paren) {:type t-close-paren}
          (some? colon) {:type t-colon}
+         (some? underscore) {:type t-underscore}
          (some? comma) {:type t-comma}
+         (some? alnum) {:type t-alnum :val alnum}
          (some? dash) {:type t-dash}
          (some? dot) {:type t-dot}
          (some? word) {:type t-word :val word}
@@ -148,10 +154,21 @@
 (defstate atom-end {epsilon end}
   (identity state))
 
-(defstate term* {t-comma term t-close-paren atom-end}
+(defstate term** {t-comma term t-close-paren atom-end}
   (update state :terms conj (assoc token :type ((:type token) token->term-type))))
 
-(defstate term {t-word term* t-number term* t-literal term*}
+(defstate named-term* {t-comma term t-close-paren atom-end}
+  (update state :terms #(update % (-> % count dec) assoc :val (assoc token :type ((:type token) token->term-type)))))
+
+(defstate named-term {t-word named-term* t-literal named-term* t-number named-term*}
+  (update state :terms (fn [terms]
+                         (update terms (-> terms count dec)
+                                 #(assoc % :key (:val %) :type :named)))))
+
+(defstate term* {t-colon named-term t-comma term t-close-paren atom-end}
+  (update state :terms conj (assoc token :type ((:type token) token->term-type))))
+
+(defstate term {t-word term* t-number term** t-underscore term** t-literal term**}
   (if (nil? (:terms state))
     (assoc state :terms [])
     state))
@@ -173,7 +190,7 @@
 (defstate atom-start* {t-open-paren pred-atom t-lte comp-op t-gte comp-op t-lt comp-op t-gt comp-op t-eq comp-op}
   (assoc state :pred (assoc token :type ((:type token) token->term-type))))
 
-(defstate atom-start {t-word atom-start* epsilon atom-start* t-lte comp-op t-gte comp-op t-lt comp-op t-gt comp-op t-eq comp-op}
+(defstate atom-start {t-word atom-start* t-alnum atom-start* epsilon atom-start* t-lte comp-op t-gte comp-op t-lt comp-op t-gt comp-op t-eq comp-op}
   (cond (= t-bang (:type token)) (assoc state :negated true)
         (= t-word (:type token)) (assoc state :pred
                                         (assoc token :type
@@ -203,7 +220,7 @@
   (let [[a-tom text] (atom-start token text (hash-map))]
     [(update state ::rule-body conj a-tom) text]))
 
-(defstate rule-body {t-word rule-body* t-bang rule-body* t-open-paren disjunction}
+(defstate rule-body {t-word rule-body* t-alnum rule-body* t-bang rule-body* t-open-paren disjunction}
   (if (nil? (::rule-body state))
     (assoc state ::rule-body [])
     state))
@@ -222,7 +239,7 @@
   (identity state))
 
 (defstate rel-arg-type* {t-comma rel-args t-close-paren rel-end}
-  (assoc-in state [::rel-args (::rel-arg-name state)] (:val token)))
+  (update state ::rel-args conj [(::rel-arg-name state) (:val token)]))
 
 (defstate rel-arg-type {t-word rel-arg-type*}
   (identity state))
@@ -234,14 +251,14 @@
   (identity state))
 
 (defstate rel-start {t-open-paren rel-args}
-  (assoc state ::rel-name (:val token)))
+  (assoc state ::rel-name (:val token) ::rel-args []))
 
 (defstate decl {t-word rel-start}
   (identity state))
 
 
 ;; Starting state
-(defstate start {t-eof end t-decl decl t-word rule-or-fact}
+(defstate start {t-eof end t-decl decl t-word rule-or-fact t-alnum rule-or-fact}
   (identity state))
 
 (defn- save-pred-terms-from-rule [program {::keys [rule-head rule-body]}]
@@ -250,7 +267,7 @@
                   (and (some? old-terms)
                        (= (count new-terms) (count old-terms))) new-terms
                   (nil? old-terms) new-terms
-                  :else (throw (Exception. (str "Inconsistent arity " new-terms "for " pred)))))]
+                  (not (keyword? pred)) (throw (Exception. (str "Inconsistent arity " new-terms "for " pred)))))]
     (reduce
      (fn [program {:keys [pred terms]}]
        (if (some? pred)
