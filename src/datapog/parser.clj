@@ -267,17 +267,19 @@
                   (and (some? old-terms)
                        (= (count new-terms) (count old-terms))) new-terms
                   (nil? old-terms) new-terms
-                  (not (keyword? pred)) (throw (Exception. (str "Inconsistent arity " new-terms "for " pred)))))]
+                  true new-terms
+                  ;(not (keyword? pred)) (throw (Exception. (str "Inconsistent arity " new-terms "for " pred)))
+                  ))]
     (reduce
      (fn [program {:keys [pred terms]}]
        (if (some? pred)
-        (if (contains? (:relations program) pred)
-          (do
-            (check pred (get-in program [:relations pred]) terms)
-            program)
-          (assoc-in program [:preds pred]
-                    (check pred (get-in program [:preds pred]) terms)))
-        program))
+         (if (contains? (:relations program) pred)
+           (do
+             (check pred (get-in program [:relations pred]) terms)
+             program)
+           (assoc-in program [:preds pred]
+                     (check pred (get-in program [:preds pred]) terms)))
+         program))
      program
      (conj rule-body rule-head))))
 

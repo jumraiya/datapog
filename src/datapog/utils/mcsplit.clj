@@ -73,7 +73,6 @@
      (= (get-in graph1 [:edges m1 v]) (get-in graph2 [:edges m2 w])))
    mapping))
 
-
  (defn- search [future mapping graph1 graph2 incumbent]
    (let [m-count (count mapping)
          i-count (count @incumbent)]
@@ -117,7 +116,6 @@
                           new-future)))
                     []
                     future)]
-               (prn (conj mapping [v w]))
                (lasync/execute pool
                                #(search new-future (conj mapping [v w]) graph1 graph2 incumbent)))))
          (let [new-class1 (disj class1 v)
