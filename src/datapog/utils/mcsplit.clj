@@ -68,10 +68,24 @@
   (if (> (count mapping) (count incumbent)) mapping incumbent))
 
 (defn- check-edges [mapping v w graph1 graph2]
-  (every?
-   (fn [[m1 m2]]
-     (= (get-in graph1 [:edges m1 v]) (get-in graph2 [:edges m2 w])))
-   mapping))
+  (and
+   ;; If the given node is part of a disjunction, it must have at least one mapped ancestor
+   ;; that is NOT part of a disjunction subgraph
+   (if (some #(when (contains? % v) v) (:disjunctions graph1))
+     (some #(when (and (contains? (:non-disj-nodes graph1) %)
+                       (some (fn [m] (when (= % (first m)) m)) mapping)) %)
+           (keys (get-in graph1 [:redges v])))
+     true)
+   (if (some #(when (contains? % w) w) (:disjunctions graph2))
+     (some #(when (and (contains? (:non-disj-nodes graph2) %)
+                       (some (fn [m] (when (= % (second m)) m)) mapping)) %)
+           (keys (get-in graph2 [:redges w])))
+     true)
+   ;; All incoming edges from matched nodes should also match 
+   (every?
+    (fn [[m1 m2]]
+      (= (get-in graph1 [:edges m1 v]) (get-in graph2 [:edges m2 w])))
+    mapping)))
 
  (defn- search [future mapping graph1 graph2 incumbent]
    (let [m-count (count mapping)
@@ -116,15 +130,18 @@
                           new-future)))
                     []
                     future)]
-               (lasync/execute pool
-                               #(search new-future (conj mapping [v w]) graph1 graph2 incumbent)))))
+               (search new-future (conj mapping [v w]) graph1 graph2 incumbent)
+               #_(lasync/execute pool
+                                 #(search new-future (conj mapping [v w]) graph1 graph2 incumbent)))))
          (let [new-class1 (disj class1 v)
                new-future (into [] (remove #(= % label-class)) future)]
            (if (seq new-class1)
-             (lasync/execute pool
+             (search (conj new-future [new-class1 class2]) mapping graph1 graph2 incumbent)
+             #_(lasync/execute pool
                              #(search (conj new-future [new-class1 class2]) mapping graph1 graph2 incumbent))
-             (lasync/execute pool
-                             #(search new-future mapping graph1 graph2 incumbent))))))))
+             (search new-future mapping graph1 graph2 incumbent)
+             #_(lasync/execute pool
+                               #(search new-future mapping graph1 graph2 incumbent))))))))
 
 (defn mcsplit [graph1 graph2]
   (let [incumbent (atom [])
@@ -136,7 +153,8 @@
                          [(into #{} (map first) vertices)
                           (into #{} (map first) (get v2 t))]))
                       v1)]
-    (lasync/execute pool #(search classes [] graph1 graph2 incumbent))
+    (search classes [] graph1 graph2 incumbent)
+                                        ;(lasync/execute pool #(search classes [] graph1 graph2 incumbent))
     (while (> (:activeCount (lasync/stats pool)) 0)
       (Thread/sleep 100)
       (println (str "Incumbent size: " (count @incumbent)

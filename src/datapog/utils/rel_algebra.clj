@@ -1,7 +1,8 @@
 (ns datapog.utils.rel-algebra
   "Utility functions to perform relational algebra operations on ASTs"
   (:require [clojure.walk :as w]
-            [clojure.set :as set]))
+            [clojure.set :as set]
+            [com.phronemophobic.clj-graphviz :refer [render-graph]]))
 
 (declare process-disjunction)
 
@@ -32,22 +33,30 @@
                         rule-body)
         rel-idx-offset (count prev-rels)
         rel-map (into (or (-> term-data :graph :vertices) {}) relations)
-        build-constraints (fn [rel-map op constraint]
-                            (let [[rel & rels]
-                                  (sort-by #(if (sequential? %)
-                                              (get rel-map (first %)) "zz")
-                                           constraint)]
-                              (transduce
-                               (map
-                                (fn [r]
-                                  [[(first rel) (if (sequential? r) (first r) :const)]
-                                   [op [(get rel-map (first rel)) (second rel)]
-                                    (if (sequential? r)
-                                      [(get rel-map (first r)) (second r)]
-                                      r)]]))
-                               (completing conj)
-                               []
-                               rels)))
+        get-rel+val #(cond
+                       (and (sequential? %) (= (first %) :const))
+                       {:type "const" :rel (nth % 1) :val (nth % 2)}
+                       (sequential? %) {:type (get rel-map (first %)) :rel (first %) :val (second %)}
+                       :else {:val %})
+        build-edges (fn [op constraint]
+                      (let [[rel & rels]
+                            (sort-by #(let [v (get-rel+val %)]
+                                        (if (not= (:type v) "const")
+                                          (:type v)
+                                          "zz"))
+                                     constraint)]
+                        (transduce
+                         (map
+                          (fn [r]
+                            (let [r-data (get-rel+val rel)
+                                  r-data' (get-rel+val r)]
+                              [[(:rel r-data) (:rel r-data')]
+                               (into [op] (mapv #(if (= "const" (:type %)) (:val %)
+                                                     [(:type %) (:val %)])
+                                                [r-data r-data']))])))
+                         (completing conj)
+                         []
+                         rels)))
         term-data (transduce
                    (comp
                     (remove #(#{:eq :lte :gte :lt :gt :or} (:pred %)))
@@ -93,7 +102,7 @@
                         (filter some?))
                        (completing
                         (fn [data const]
-                          (let [conditions (build-constraints rel-map = const)]
+                          (let [edges (build-edges = const)]
                             (-> data
                                 (update :constraints conj (into [=] const))
                                 (update :graph
@@ -104,7 +113,7 @@
                                                  (update-in (into [:edges] path) #(conj (or % #{}) condition))
                                                  (update-in (into [:redges] (-> path reverse vec)) #(conj (or % #{}) condition))))
                                            g
-                                           conditions)))))))
+                                           edges)))))))
                        data
                        (:term-pos data))))
                    (or (and term-data (-> term-data
@@ -113,47 +122,73 @@
                        {:term-pos {} :term-paths {} :offset 0
                         :relations relations
                         :graph {:vertices (into {} relations)
+                                :negated #{}
                                 :edges {}}})
                    rule-body)
         term-data (transduce
-                   (map
-                    (fn [{:keys [pred terms]}]
-                      (let [op (case pred :eq = :lte <= :gte >= :gt > :lt <)
-                            values (mapv #(if (= :var (:type %))
-                                            (->> (get-in term-data [:term-pos %])
-                                                 (mapv (fn [pos]
-                                                         (get-in term-data [:term-paths pos])))
-                                                 sort first)
-                                            (:val %))
-                                         terms)
-                            conditions (build-constraints rel-map op values)]
-                        [op values conditions])))
-                   (fn ([data [op values conditions]]
-                        (-> data
-                            (update :constraints conj
-                                    [op values])
-                            (update :graph
-                                    (fn [g]
-                                      (reduce
-                                       (fn [graph [path condition]]
-                                         (-> graph
-                                             (update-in (into [:edges] path) #(conj (or % #{}) condition))
-                                             (update-in (into [:redges] (-> path reverse vec)) #(conj (or % #{}) condition))))
-                                       g
-                                       conditions)))))
+                   (comp
+                    (filter #(#{:eq :lte :gte :lt :gt} (:pred %)))
+                    (map
+                     (fn [{:keys [pred terms]}]
+                       (let [op (case pred :eq = :lte <= :gte >= :gt > :lt <)
+                             [bound-rels1 bound-rels2]
+                             (mapv
+                              (fn [term]
+                                (if (= :var (:type term))
+                                  (mapv
+                                   #(get-in term-data [:term-paths %])
+                                   (get-in term-data [:term-pos term]))
+                                  [[:const (gensym "const") (:val term)]]))
+                              terms)
+                             new-rels (into {}
+                                            (comp
+                                             cat
+                                             (filter #(= :const (first %)))
+                                             (map #(vector (second %) "const")))
+                                            [bound-rels1 bound-rels2])]
+                         [op bound-rels1 bound-rels2 new-rels])))
+                    (map (fn [[op bound-rels1 bound-rels2 new-rels]]
+                           (for [rel1 bound-rels1 rel2 bound-rels2]
+                             [(into [op] (mapv #(if (= (first %) :const)
+                                                  (nth % 2) %)
+                                               [rel1 rel2]))
+                              (build-edges op [rel1 rel2])
+                              new-rels]))))
+                   (fn ([data constraints+edges]
+                        (reduce
+                         (fn [data [constraint edges new-rels]]
+                           (-> data
+                               (update :constraints conj constraint)
+                               (update-in [:graph]
+                                          (fn [graph]
+                                            (reduce
+                                             (fn [g [path condition]]
+                                               (-> g
+                                                   (update-in (into [:edges] path) #(conj (or % #{}) condition))
+                                                   (update-in (into [:redges] (-> path reverse vec)) #(conj (or % #{}) condition))
+                                                   (update :vertices into new-rels)))
+                                             graph edges)))))
+                         data
+                         constraints+edges))
                      ([data]
-                      (assoc-in data [:graph :constraint-map]
-                                (reduce
-                                 (fn [m [v1 edges]]
-                                   (reduce
-                                    (fn [m [v2 constraints]]
-                                      (update m constraints #(conj (or % #{}) [v1 v2])))
-                                    m
-                                    edges))
-                                 {}
-                                 (get-in data [:graph :edges])))))
+                      (-> data
+                          (assoc-in [:graph :constraint-map]
+                                    (reduce
+                                     (fn [m [v1 edges]]
+                                       (reduce
+                                        (fn [m [v2 constraints]]
+                                          (update m constraints #(conj (or % #{}) [v1 v2])))
+                                        m
+                                        edges))
+                                     {}
+                                     (get-in data [:graph :edges])))
+                          (assoc-in [:graph :non-disj-nodes]
+                                    (set
+                                     (remove (reduce into #{}
+                                                     (-> data :graph :disjunctions))
+                                             (-> data :graph :vertices keys)))))))
                    term-data
-                   (filter #(#{:eq :lte :gte :lt :gt} (:pred %)) rule-body))
+                   rule-body)
         term-data (reduce
                    #(process-disjunction program %1 %2)
                    term-data (filter #(= :or (:pred %)) rule-body))]
@@ -161,8 +196,8 @@
 
  (defn- process-disjunction [program term-data or-clause]
    (let [rel (gensym "or")
-         [_ conjunctions]
-         (reduce (fn [[offset cnjn-data] rule-body]
+         [_ conjunctions new-subgraph]
+         (reduce (fn [[offset cnjn-data subgraph] rule-body]
                    (let [data (gen-dep-graph program rule-body
                                              (assoc term-data :offset offset))
                          new-vertices (set/difference (-> data :graph :vertices keys set)
@@ -178,38 +213,69 @@
                                               [root (reduce
                                                      (fn [g node]
                                                        (-> g
-                                                           (update-in [:graph :edges root] assoc #{} node)
-                                                           (update-in [:graph :constraint-map #{}] #(conj (or % #{}) [root node]))))
+                                                           (update-in [:graph :edges root] assoc node #{})
+                                                           (update-in [:graph :constraint-map #{}] #(conj (or % #{}) [root node]))
+                                                           (assoc-in [:graph :vertices root] "root")))
                                                      data
                                                      top-nodes)]))
                          data (-> data
-                               (assoc-in [:graph :edges rel root-node] #{:or})
-                               (update-in [:graph :constraint-map #{:or}]
-                                          #(conj (or % #{}) [rel root-node])))]
+                                  (assoc-in [:graph :edges rel root-node] #{:or})
+                                  (update-in [:graph :constraint-map #{:or}]
+                                             #(conj (or % #{}) [rel root-node])))]
                      [(:offset data)
-                      (conj cnjn-data data)]))
-                 [(:offset term-data) []]
+                      (conj cnjn-data data)
+                      (into subgraph (conj new-vertices root-node))]))
+                 [(:offset term-data) [] #{rel}]
                  (:terms or-clause))]
                                                                                                            ;(println (pr-str conjunctions))
      (reduce
       (fn [data cnjn]
-        (let [subgraph (:graph cnjn)]
-          (-> data
-              (update :term-pos (fn [pos] (merge-with #(into (set %1) %2)
-                                                      pos (:term-pos cnjn))))
-              (update :term-paths merge (:term-paths cnjn))
-              (update-in [:graph :constraint-map] #(merge-with into % (:constraint-map subgraph)))
-              (assoc :offset (:offset cnjn))
-              (update-in [:graph :vertices] into (:vertices subgraph))
-              (update-in [:graph :edges] #(merge-with into % (:edges subgraph)))
-              (update-in [:graph :redges] #(merge-with into % (:redges subgraph))))))
+        (-> data
+            (update :term-pos (fn [pos] (merge-with #(into (set %1) %2)
+                                                    pos (:term-pos cnjn))))
+            (update :term-paths merge (:term-paths cnjn))
+            (update-in [:graph :constraint-map] #(merge-with into % (-> cnjn :graph :constraint-map)))
+            (assoc :offset (:offset cnjn))
+            (update-in [:graph :disjunctions] #(conj (or % [])))
+            (update-in [:graph :vertices] into (-> cnjn :graph :vertices))
+            (update-in [:graph :edges] #(merge-with into % (-> cnjn :graph :edges)))
+            (update-in [:graph :redges] #(merge-with into % (-> cnjn :graph :redges)))))
       (-> term-data
           (assoc-in [:graph :vertices rel] "or")
+          (update-in [:graph :disjunctions] #(conj (or % []) new-subgraph))
           (update :constraints #(if (seq %2) (conj %1 %2) %1)
                   (into [`or]
                         (comp (map :constraints) (filter some?))
                         conjunctions)))
       conjunctions)))
+
+(defn render-dep-graph [graph]
+  (let [defin (reduce
+               (fn [d [v]]
+                 (-> d
+                     (update :nodes conj {:id (name v)})
+                     (update :edges #(reduce
+                                      (fn [edges [to label]]
+                                        (conj edges
+                                              {:from (name v) :to (name to)
+                                               :label (reduce (fn [s l]
+                                                                (str s
+                                                                     (if-let [[o t1 t2] (and (sequential? l) l)]
+                                                                       (str t1
+                                                                        (condp = o
+                                                                          = "="
+                                                                          > ">"
+                                                                          < "<"
+                                                                          <= "<="
+                                                                          >= ">="
+                                                                          o)
+                                                                        t2)
+                                                                       l)))
+                                                              "" label)}))
+                                      % (get-in graph [:edges v])))))
+               {:nodes [] :edges []} (:vertices graph))]
+    (prn defin)
+    (render-graph (assoc defin :flags #{:directed} :default-attributes {:edge {:label "label"}}))))
 
 (defn- merge-nodes
   "Given two nodes in two graphs, finds common edges between them and returns a 3-tuple of [new-common-vertex new-graph1 new-graph2]."
