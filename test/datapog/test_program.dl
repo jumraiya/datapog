@@ -4,4 +4,4 @@
 
 usedTaxCredit(id) :- ev(id: id,purchaseDate: purchaseDate,modelYear: modelYear,salePrice: salePrice,weight: weight),purchaseDate>2022,weight<=14000,salePrice<=25000,income(amount,type),(amount<150000,type='joint';amount<11250,type='head';amount<75000,type='single')
 
-evTaxCredit(id) :- ev(id: id,purchaseDate: purchaseDate,modelYear: modelYear,salePrice: salePrice,weight: weight, capacity: capacity), (purchaseDate<2023,weight<=14000, capacity>=4;purchaseDate>2022,(type='sedan',salePrice<=55000;type='truck',salePrice<=80000)),income(amount,type),(amount<150000,type='joint';amount<11250,type='head';amount<75000,type='single')
+evTaxCredit(id) :- ev(id: id,purchaseDate: purchaseDate,modelYear: modelYear,salePrice: salePrice,weight: weight, capacity: capacity), (purchaseDate<2023,weight<=14000, capacity>=4;purchaseDate>2022,(type='sedan',salePrice<=55000;type='truck',salePrice<=80000)),income(amount,inctype),(amount<150001,inctype='joint';amount<11250,inctype='head';amount<75000,inctype='single')

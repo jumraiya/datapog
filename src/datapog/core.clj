@@ -13,12 +13,14 @@
 
 (comment
 
-  (def prog (p/parse-program (slurp "/Users/jumraiya/projects/datapog/test/datapog/test_program.dl")))
+  (do
+    (def prog (p/parse-program (slurp "/Users/jumraiya/projects/datapog/test/datapog/test_program.dl")))
 
-  (def r1 (-> prog :rules first :body))
+    (def r1 (-> prog :rules first :body))
 
-  (def r2 (-> prog :rules second :body))
+    (def r2 (-> prog :rules second :body))
 
-  (def g1 (:graph (r/gen-dep-graph prog r1)))
-
-  (def g2 (:graph (r/gen-dep-graph prog r2))))
+    (def g1 (:graph (r/gen-dep-graph prog r1)))
+    
+    (def g2 (:graph (r/gen-dep-graph prog r2))))
+  )

@@ -24,7 +24,13 @@
          r))
      (sort comp-atoms conjunction)))
 
- (defn gen-dep-graph [program rule-body
+(defn is-disj-node? [node graph]
+  (or (#{"or" "root"} (get-in graph [:vertices node]))
+      (some (fn [[from]]
+              (#{"root" "or"} (get-in graph [:vertices from])))
+            (get-in graph [:redges node]))))
+
+(defn gen-dep-graph [program rule-body
                      & [term-data]]
   (let [prev-rels (or (:relations term-data) [])
         relations (into prev-rels
@@ -182,16 +188,18 @@
                                         edges))
                                      {}
                                      (get-in data [:graph :edges])))
-                          (assoc-in [:graph :non-disj-nodes]
-                                    (set
-                                     (remove (reduce into #{}
-                                                     (-> data :graph :disjunctions))
-                                             (-> data :graph :vertices keys)))))))
+                          #_(assoc-in [:graph :non-disj-nodes]
+                                      (set
+                                       (remove (reduce into #{}
+                                                       (-> data :graph :disjunctions))
+                                               (-> data :graph :vertices keys)))))))
                    term-data
                    rule-body)
-        term-data (reduce
-                   #(process-disjunction program %1 %2)
-                   term-data (filter #(= :or (:pred %)) rule-body))]
+        term-data (if-let [disjns (seq (filter #(= :or (:pred %)) rule-body))]
+                    (reduce
+                     #(process-disjunction program %1 %2)
+                     term-data disjns)
+                    term-data)]
     term-data))
 
  (defn- process-disjunction [program term-data or-clause]
@@ -213,13 +221,15 @@
                                               [root (reduce
                                                      (fn [g node]
                                                        (-> g
-                                                           (update-in [:graph :edges root] assoc node #{})
-                                                           (update-in [:graph :constraint-map #{}] #(conj (or % #{}) [root node]))
+                                                           (update-in [:graph :edges root] assoc node #{:conj})
+                                                           (update-in [:graph :redges node] assoc root #{:conj})
+                                                           (update-in [:graph :constraint-map #{:conj}] #(conj (or % #{}) [root node]))
                                                            (assoc-in [:graph :vertices root] "root")))
                                                      data
                                                      top-nodes)]))
                          data (-> data
                                   (assoc-in [:graph :edges rel root-node] #{:or})
+                                  (assoc-in [:graph :redges root-node rel] #{:or})
                                   (update-in [:graph :constraint-map #{:or}]
                                              #(conj (or % #{}) [rel root-node])))]
                      [(:offset data)
@@ -236,18 +246,104 @@
             (update :term-paths merge (:term-paths cnjn))
             (update-in [:graph :constraint-map] #(merge-with into % (-> cnjn :graph :constraint-map)))
             (assoc :offset (:offset cnjn))
-            (update-in [:graph :disjunctions] #(conj (or % [])))
+            ;(update-in [:graph :disjunctions] #(conj (or % [])))
             (update-in [:graph :vertices] into (-> cnjn :graph :vertices))
             (update-in [:graph :edges] #(merge-with into % (-> cnjn :graph :edges)))
             (update-in [:graph :redges] #(merge-with into % (-> cnjn :graph :redges)))))
       (-> term-data
           (assoc-in [:graph :vertices rel] "or")
-          (update-in [:graph :disjunctions] #(conj (or % []) new-subgraph))
+          ;(update-in [:graph :disjunctions] #(conj (or % []) new-subgraph))
           (update :constraints #(if (seq %2) (conj %1 %2) %1)
                   (into [`or]
                         (comp (map :constraints) (filter some?))
                         conjunctions)))
       conjunctions)))
+
+(defn disj-node-seq-ascending
+  "Returns a sequence of disjunction nodes starting from bottom and going up."
+  ([graph nodes]
+   (let [find-disj-ancestor (fn [node]
+                              (some (fn [[n]]
+                                      (when (is-disj-node? n graph)
+                                        n))
+                                    (get-in graph [:redges node])))
+         ancestors (into #{} (comp (map find-disj-ancestor)
+                                   (remove nil?))
+                         (last nodes))]
+     (if (seq ancestors)
+       (disj-node-seq-ascending
+        graph
+        (conj
+         nodes
+         (vec
+          (sort-by #(if (some? (find-disj-ancestor %))
+                      -1 0)
+                   ancestors))))
+       (transduce
+        (map-indexed #(vector %1 %2))
+        (fn
+          ([seen [level node-group]]
+           (transduce
+            (map-indexed #(vector %1 %2))
+            (completing
+             (fn [seen [idx node]]
+               (update seen node #(conj (or % []) [level idx]))))
+            seen
+            node-group))
+          ([seen]
+           (mapv
+            #(into [] (remove nil?) %)
+            (reduce
+             (fn [ret [_ indices]]
+               (if (seq indices)
+                 (reduce
+                  (fn [ret [level idx]]
+                    (update ret level
+                            #(into (conj (subvec % 0 idx) nil)
+                                   (if (= idx (-> % count dec))
+                                     [] (subvec % (inc idx))))))
+                  ret (butlast indices))
+                 ret))
+             nodes
+             seen))))
+        {}
+        nodes))))
+  ([graph]
+   (let [leaves (into [] (comp (map key)
+                               (filter #(not (contains? (:edges graph) %)))
+                               (filter #(is-disj-node? % graph)))
+                      (:vertices graph))]
+     (disj-node-seq-ascending graph [leaves]))))
+
+(defn disj-node-seq-descending
+  "Returns a sequence of disjunction nodes at each level starting from top"
+  [graph]
+  (let [top-nodes (into []
+                        (comp
+                         (filter (fn [[node type]]
+                                   (and (= "or" type)
+                                        (not (contains? (:redges graph) node)))))
+                         (map key))
+                        (:vertices graph))
+        get-children (fn [nodes]
+                       (transduce
+                        (comp (map #(get-in graph [:edges %]))
+                              (map #(filter (fn [d] (is-disj-node? d graph)) (keys %))))
+                        (completing into)
+                        []
+                        nodes))]
+    (loop [ret [top-nodes]]
+      (let [children (get-children (last ret))]
+        (if (seq children)
+          (recur (conj ret children))
+          ret)))))
+
+(defn get-non-disj-nodes [graph]
+  (into []
+        (comp
+         (map key)
+         (remove #(is-disj-node? % graph)))
+        (:vertices graph)))
 
 (defn render-dep-graph [graph]
   (let [defin (reduce
@@ -262,19 +358,18 @@
                                                                 (str s
                                                                      (if-let [[o t1 t2] (and (sequential? l) l)]
                                                                        (str t1
-                                                                        (condp = o
-                                                                          = "="
-                                                                          > ">"
-                                                                          < "<"
-                                                                          <= "<="
-                                                                          >= ">="
-                                                                          o)
-                                                                        t2)
+                                                                            (condp = o
+                                                                              = "="
+                                                                              > ">"
+                                                                              < "<"
+                                                                              <= "<="
+                                                                              >= ">="
+                                                                              o)
+                                                                            t2)
                                                                        l)))
                                                               "" label)}))
                                       % (get-in graph [:edges v])))))
                {:nodes [] :edges []} (:vertices graph))]
-    (prn defin)
     (render-graph (assoc defin :flags #{:directed} :default-attributes {:edge {:label "label"}}))))
 
 (defn- merge-nodes
