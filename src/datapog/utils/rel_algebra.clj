@@ -2,7 +2,8 @@
   "Utility functions to perform relational algebra operations on ASTs"
   (:require [clojure.walk :as w]
             [clojure.set :as set]
-            [com.phronemophobic.clj-graphviz :refer [render-graph]]))
+            [com.phronemophobic.clj-graphviz :refer [render-graph]]
+            [clojure.string :as str]))
 
 (declare process-disjunction)
 
@@ -68,20 +69,21 @@
                     (remove #(#{:eq :lte :gte :lt :gt :or} (:pred %)))
                     (map-indexed
                      (fn [rel-idx {:keys [pred terms]}]
-                       (into {}
-                             (map-indexed
-                              (fn [term-idx term]
-                                (let [[term term-idx] (if (= (:type term) :named)
-                                                        (some #(when (= (:key term)
-                                                                        (-> % second first))
-                                                                 [(:val term) (first %)])
-                                                              (map-indexed vector (get-in program [:relations pred])))
-                                                        [term term-idx])]
-                                  (vector term-idx [term [(-> relations (nth (+ rel-idx rel-idx-offset)) first)
-                                                          term-idx]]))))
-                             terms))))
+                       (let [rel-id (-> relations (nth (+ rel-idx rel-idx-offset)) first)]
+                         [(into {}
+                                (map-indexed
+                                 (fn [term-idx term]
+                                   (let [[term term-idx] (if (= (:type term) :named)
+                                                           (some #(when (= (:key term)
+                                                                           (-> % second first))
+                                                                    [(:val term) (first %)])
+                                                                 (map-indexed vector (get-in program [:relations pred])))
+                                                           [term term-idx])]
+                                     (vector term-idx [term [rel-id term-idx]]))))
+                                terms)
+                          [rel-id terms]]))))
                    (fn
-                     ([data indices]
+                     ([data [indices a-tom]]
                       (-> data
                           (update :term-pos
                                   (fn [pos]
@@ -95,6 +97,7 @@
                                        (assoc paths (+ idx (:offset data)) path))
                                      paths
                                      indices)))
+                          (update-in [:graph :terms] #(conj (or % {}) a-tom))
                           (update :offset + (inc (apply max (keys indices))))))
                      ([data]
                       (transduce
@@ -248,6 +251,7 @@
             (assoc :offset (:offset cnjn))
             ;(update-in [:graph :disjunctions] #(conj (or % [])))
             (update-in [:graph :vertices] into (-> cnjn :graph :vertices))
+            (update-in [:graph :terms] into (-> cnjn :graph :terms))
             (update-in [:graph :edges] #(merge-with into % (-> cnjn :graph :edges)))
             (update-in [:graph :redges] #(merge-with into % (-> cnjn :graph :redges)))))
       (-> term-data
@@ -258,6 +262,13 @@
                         (comp (map :constraints) (filter some?))
                         conjunctions)))
       conjunctions)))
+
+;; (defn get-root-nodes
+;;   "Returns nodes that have no incoming edges."
+;;   [graph]
+;;   (filterv #(not (some (fn [[_ edges]] (contains? edges %))
+;;                        (:edges graph)))
+;;            (-> graph :vertices keys))) 
 
 (defn disj-node-seq-ascending
   "Returns a sequence of disjunction nodes starting from bottom and going up."
@@ -372,50 +383,139 @@
                {:nodes [] :edges []} (:vertices graph))]
     (render-graph (assoc defin :flags #{:directed} :default-attributes {:edge {:label "label"}}))))
 
-(defn- merge-nodes
-  "Given two nodes in two graphs, finds common edges between them and returns a 3-tuple of [new-common-vertex new-graph1 new-graph2]."
-  [graph1 graph2 node1 node2]
-  (let [edges1 (get-in graph1 [:edges node1])
-        edges2 (get-in graph2 [:edges node2])
-        common-edges (for [[edge1 constraints1] edges1
-                           [edge2 constraints2] edges2
-                           :when (= constraints1 constraints2)]
-                       [edge1 edge2 constraints1])
-        update-constraints (fn [cs parent child]
-                             (into #{}
-                                   (map
-                                    (fn [c]
-                                      (mapv #(if (and (sequential? %) (= (first %) parent))
-                                               (assoc % 0 (name child)) %)
-                                            c)))
-                                   cs))]
-    (when (seq common-edges)
-      (let [parent-rel (get-in graph1 [:vertices node1])
-            new-vertex (gensym "rel")
-            rem-edges-1 (reduce #(dissoc %1 %2) edges1 (mapv first common-edges))
-            rem-edges-2 (reduce #(dissoc %1 %2) edges2 (mapv second common-edges))]
-        [(hash-map new-vertex (into {} (mapv
-                                        (fn [[_ e cs]]
-                                          [(gensym (get-in graph2 [:vertices e]))
-                                           (update-constraints cs parent-rel new-vertex)])
-                                        common-edges)))
-         (-> graph1 (update :edges #(-> %
-                                        (dissoc node1)
-                                        (assoc new-vertex
-                                               (reduce (fn [es [e cs]]
-                                                         (assoc es e (update-constraints cs parent-rel new-vertex)))
-                                                       {}
-                                                       rem-edges-1))))
-             (update :vertices (fn [v]
-                                 (-> v
-                                     (dissoc node1)
-                                     (assoc new-vertex (name new-vertex))))))
-         (-> graph2 (update :edges #(-> %
-                                        (dissoc node2)
-                                        (assoc new-vertex
-                                               (reduce (fn [es [e cs]]
-                                                         (assoc es e (update-constraints cs parent-rel new-vertex)))
-                                                       {}
-                                                       rem-edges-2))))
-             (update :vertices dissoc node1)
-             (update :vertices assoc new-vertex (name new-vertex)))]))))
+(defn delete-node
+  "Deletes a vertex/node and all related data from a graph"
+  [node graph]
+  (let [filter-constraint-map
+        (fn [cmap v]
+          (into {}
+                (map
+                 (fn [[k rels]]
+                   (let [rels
+                         (filter
+                          (fn [[r1 r2]]
+                            (or (= r1 v) (= r2 v)))
+                          rels)]
+                     (when (seq rels)
+                       [k rels]))))
+                cmap))
+        remove-edges
+        (fn [edges node]
+          (into {}
+                (map (fn [[k v]]
+                       [k (dissoc v node)]))
+                (dissoc edges node)))]
+    (-> graph
+        (update :vertices dissoc node)
+        (update :edges #(remove-edges % node))
+        #_(update :edges #(reduce (fn [e [n]]
+                                    (let [m (dissoc (get e n) node)]
+                                      (if (empty? m)
+                                        (dissoc e n)
+                                        (assoc e n m))))
+                                  % (get-in graph [:redges node])))
+        (update :redges dissoc node)
+        (update :constraint-map #(filter-constraint-map % node))
+        (update :terms dissoc node))))
+
+#_(defn- merge-nodes
+    "Given two nodes in two graphs, finds common edges between them and returns a 3-tuple of [new-common-vertex new-graph1 new-graph2]."
+    [graph1 graph2 node1 node2]
+    (let [edges1 (get-in graph1 [:edges node1])
+          edges2 (get-in graph2 [:edges node2])
+          common-edges (for [[edge1 constraints1] edges1
+                             [edge2 constraints2] edges2
+                             :when (= constraints1 constraints2)]
+                         [edge1 edge2 constraints1])
+          update-constraints (fn [cs parent child]
+                               (into #{}
+                                     (map
+                                      (fn [c]
+                                        (mapv #(if (and (sequential? %) (= (first %) parent))
+                                                 (assoc % 0 (name child)) %)
+                                              c)))
+                                     cs))]
+      (when (seq common-edges)
+        (let [parent-rel (get-in graph1 [:vertices node1])
+              new-vertex (gensym "rel")
+              rem-edges-1 (reduce #(dissoc %1 %2) edges1 (mapv first common-edges))
+              rem-edges-2 (reduce #(dissoc %1 %2) edges2 (mapv second common-edges))]
+          [(hash-map new-vertex (into {} (mapv
+                                          (fn [[_ e cs]]
+                                            [(gensym (get-in graph2 [:vertices e]))
+                                             (update-constraints cs parent-rel new-vertex)])
+                                          common-edges)))
+           (-> graph1 (update :edges #(-> %
+                                          (dissoc node1)
+                                          (assoc new-vertex
+                                                 (reduce (fn [es [e cs]]
+                                                           (assoc es e (update-constraints cs parent-rel new-vertex)))
+                                                         {}
+                                                         rem-edges-1))))
+               (update :vertices (fn [v]
+                                   (-> v
+                                       (dissoc node1)
+                                       (assoc new-vertex (name new-vertex))))))
+           (-> graph2 (update :edges #(-> %
+                                          (dissoc node2)
+                                          (assoc new-vertex
+                                                 (reduce (fn [es [e cs]]
+                                                           (assoc es e (update-constraints cs parent-rel new-vertex)))
+                                                         {}
+                                                         rem-edges-2))))
+               (update :vertices dissoc node1)
+               (update :vertices assoc new-vertex (name new-vertex)))]))))
+(defn- term->string [term]
+  (if (= :named (:type term))
+    (-> term :val :val)
+    (:val term)))
+
+ (defn- disj->string
+   [node graph]
+   (case (get-in graph [:vertices node])
+     "or" (let [edges (get-in graph [:edges node])]
+            (str "(" (str/join ";"
+                               (into []
+                                     (comp
+                                      (filter #(= #{:or} (val %)))
+                                      (map #(disj->string (key %) graph)))
+                                     edges)) ")"))
+     "root" (let [edges (get-in graph [:edges node])]
+              (str/join ","
+                        (into []
+                              (comp
+                               (filter #(= #{:conj} (val %)))
+                               (map #(disj->string (key %) graph)))
+                              edges)))
+     (if-let [terms (get-in graph [:terms node])]
+       (str (get-in graph [:vertices node]) "("
+            (str/join "," (mapv term->string terms)) ")"
+            (when-let [children (seq (into []
+                                           (comp (map key)
+                                                 (remove #(is-disj-node? % graph)))
+                                           (get-in graph [:edges node])))]
+              (str "," (str/join "," (mapv #(disj->string % graph)
+                                           children)))))
+       (when (= "const" (get-in graph [:vertices node]))
+         (let [[rel conditions] (first (get-in graph [:redges node]))]
+           (str/join ","
+                     (mapv (fn [[op [_ idx] v]]
+                             (str
+                              (term->string (get-in graph [:terms rel idx]))
+                              (condp = op
+                                = "="
+                                > ">"
+                                < "<"
+                                <= "<="
+                                >= ">="
+                                op)
+                              v)) conditions)))))))
+
+(defn graph->rule
+  "Generates a rule string from a given graph. If the graph contains terms map then uses that otherwise generates new term names."
+  [graph]
+  (str/join ","
+   (into [] (comp (map key)
+                  (remove #(contains? (:redges graph) %))
+                  (map #(disj->string % graph)))
+         (:vertices graph))))

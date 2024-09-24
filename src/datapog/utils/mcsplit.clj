@@ -73,7 +73,7 @@
 
 (defn- swap-mapping [incumbent mapping]
   (if (> (count mapping) (count incumbent)) mapping incumbent))
-
+#trace
 (defn- check-edges [mapping v w graph1 graph2]
   (and
    (if (rel/is-disj-node? v graph1)
@@ -143,6 +143,10 @@
                        (and (rel/is-disj-node? (ffirst %2) graph1)
                             (not (#{"or" "root"}
                                   (get-in graph1 [:vertices (ffirst %2)])))) %2
+                       (#{"root"}
+                        (get-in graph1 [:vertices (ffirst %1)])) %1
+                       (#{"root"}
+                        (get-in graph1 [:vertices (ffirst %2)])) %2
                        (> (max (count (first %2)) (count (second %2)))
                           (max (count (first %1)) (count (second %2)))) %2
                        :else %1)
@@ -194,17 +198,9 @@
                               #(search new-future mapping graph1 graph2 incumbent))))))))
 
 
- (defn find-mcs [graph1 graph2]
+ (defn find-mcs+mapping [graph1 graph2]
   (let [incumbent (atom [])
-        v1 (group-by val (:vertices graph1))
-        v2 (group-by val (:vertices graph2))
-        classes (init-label-groups graph1 graph2)
-        #_(into []
-                (map
-                 (fn [[t vertices]]
-                   [(into #{} (map first) vertices)
-                    (into #{} (map first) (get v2 t))]))
-                v1)]
+        classes (init-label-groups graph1 graph2)]
     (search classes [] graph1 graph2 incumbent)
                         ;(lasync/execute pool #(search classes [] graph1 graph2 incumbent))
     (while (> (:activeCount (lasync/stats pool)) 0)
@@ -212,36 +208,6 @@
       (println (str "Incumbent size: " (count @incumbent)
                     " active searches: " (:activeCount (lasync/stats pool)))))
     (let [mapping @incumbent
-          mapped1 (into #{} (map first) mapping)
-          mapping (filter
-                   (fn [[v]] (if-let [d (some #(when (contains? % v) %)
-                                              (:disjunctions graph1))]
-                               (seq (set/intersection mapped1 (disj d v)))
-                               true))
-                   mapping)
-          filter-constraint-map (fn [cmap v]
-                                  (into {}
-                                        (map
-                                         (fn [[k rels]]
-                                           (let [rels
-                                                 (filter
-                                                  (fn [[r1 r2]]
-                                                    (or (= r1 v) (= r2 v)))
-                                                  rels)]
-                                             (when (seq rels)
-                                               [k rels]))))
-                                        cmap))
-          remove-edges (fn [edges node]
-                         (into {}
-                               (map (fn [[k v]]
-                                      [k (dissoc v node)]))
-                               (dissoc edges node)))
-          remove-node (fn [graph node]
-                        (-> graph
-                            (update :vertices dissoc node)
-                            (update :edges #(remove-edges % node))
-                            (update :redges #(remove-edges % node))
-                            (update :constraint-map #(filter-constraint-map % node))))
           [new-nodes node-map] (transduce
                                 (comp (map first)
                                       (map #(vector (get-in graph1 [:vertices %]) %))
@@ -252,7 +218,6 @@
                                 [[] {}]
                                 mapping)
           rev-node-map (set/map-invert node-map)]
-      (prn mapping)
       (transduce
        (comp
         (map-indexed (fn [idx new-node]
@@ -278,21 +243,17 @@
                           redges))
                       {}
                       (get-in graph1 [:redges v]))))))
-       (fn ([common [[new-node type] [v w] [edges cmap] redges]]
+       (fn ([common [[new-node type] [v] [edges cmap] redges]]
             (-> common
                 (update :vertices assoc new-node type)
                 (update :edges #(if (not-empty edges) (assoc % new-node edges) %))
                 (update :redges #(if (not-empty redges) (assoc % new-node redges) %))
+                (update :terms #(if-let [terms (seq (get-in graph1 [:terms v]))]
+                                  (assoc % new-node (vec terms))
+                                  %))
                 (update :constraint-map #(merge-with into % cmap))))
-         #_(let []
-             [(remove-node g1 v)
-              (remove-node g2 w)
-              (-> common
-                  (assoc-in [:vertices v] (get-in graph1 [:vertices v]))
-                  (assoc-in [:edges v] (into {} (filter #(v1 (key %)))
-                                             (get-in graph1 [:edges v]))))])
          ([common]
-          (let [remove-nodes (into []
+          (let [remove-nodes (into #{} ;; We might end with nodes with no edges or disjunction nodes that are no longer part of a disjunction, remove them
                                    (comp
                                     (filter
                                      (fn [[node type]]
@@ -300,26 +261,27 @@
                                                 (empty? (get-in common [:redges node])))
                                            (and (rel/is-disj-node? (get rev-node-map node) graph1)
                                                 (not (#{"or" "root"} type))
-                                                (nil? (some #(when (rel/is-disj-node? (get rev-node-map (first %)) graph1)
+                                                (nil? (some #(when (rel/is-disj-node?
+                                                                    (get rev-node-map (first %)) graph1)
                                                                %)
                                                             (get-in common [:redges node])))))))
                                     (map first))
-                                   (:vertices common))]
-            [graph1 graph2
-            ;; We might end with nodes with no edges or disjunction nodes that are no longer part of a disjunction, remove them
-             (reduce
-               (fn [graph node]
-                 (-> graph
-                     (update :vertices dissoc node)
-                     (update :edges #(reduce (fn [e [n]]
-                                               (let [m (dissoc (get e n) node)]
-                                                 (if (empty? m)
-                                                   (dissoc e n)
-                                                   (assoc e n m))))
-                                             % (get-in graph [:redges node])))
-                     (update :redges dissoc node))
-                 graph)
-              common
-              remove-nodes)])))
+                                   (:vertices common))
+                common (reduce
+                        (fn [graph node]
+                          (rel/delete-node node graph))
+                        common
+                        remove-nodes)
+                mapping (remove (fn [[v]] (contains? remove-nodes (get node-map v))) mapping)]
+            [mapping common])))
        {:edges {} :vertices {}}
        new-nodes))))
+
+(defn merge-rules [graph1 graph2]
+  (let [[mapping mcs] (find-mcs+mapping graph1 graph2)
+        terms (into []
+                    (comp (map val)
+                          cat
+                          (filter #(#{:named :var} (:type %))))
+                    (:terms mcs))]
+    ))

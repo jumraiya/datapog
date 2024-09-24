@@ -1,6 +1,6 @@
 # datapog
 
-My shitty datalog engine, mainly for learning purposes
+My toy datalog engine, mainly for learning purposes
 
 # Goals
 - Allow execution of datalog programs with recursion and negation
