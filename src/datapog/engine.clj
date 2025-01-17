@@ -1,7 +1,10 @@
-(ns datapog.engine)
+(ns datapog.engine
+  "Functions to process a parsed datalog program")
 
 
-(defn eval-pred [pred program]
+(defn eval-pred
+  "Non incremental version of eval-pred, applies the given predicate to a program"
+  [pred program]
   (transduce
    (comp
     (filter #(= pred (-> % :head :pred)))
@@ -11,7 +14,9 @@
    []
    (:rules program)))
 
-(defn eval-rule-incr [{:keys [rule-fn]} program]
+(defn eval-rule-incr
+  "Helper function for incrementally applying a rule"
+  [{:keys [rule-fn]} program]
   (transduce
    (comp
     (map (fn [[relation facts]]
@@ -20,7 +25,9 @@
    []
    (:deltas program)))
 
-(defn eval-pred-incr [pred program]
+(defn eval-pred-incr
+  "Incremental version of eval-pred"
+  [pred program]
   (transduce
    (comp
     (filter #(= pred (-> % :head :pred)))
@@ -29,7 +36,9 @@
    []
    (:rules program)))
 
-(defn compile-rule [program {:keys [head body]}]
+(defn compile-rule
+  "Compiles a datalog rule into a function which takes in a program and applies the rule to facts contained in it"
+  [_program {:keys [head body]}]
   (let [program (gensym)
         pred-syms (into [] (comp (remove #(#{:eq :lte :gte :lt :gt} (:pred %))) (map #(vector (:pred %) (gensym)))) body)
         term-data (transduce
@@ -101,7 +110,9 @@
         (for ~for-clause
           ~projection)))))
 
-(defn validate+compile-program [program]
+(defn validate+compile-program
+  "Compiles all rules in a given program into clojure functions"
+  [program]
   (transduce
    (map-indexed
     (fn [idx rule]
@@ -112,7 +123,9 @@
    program
    (:rules program)))
 
-(defn semi-naive-eval [program]
+(defn semi-naive-eval
+  "Evaluates a given program until a fixed point is reached"
+  [program]
    (let [program (transduce
                   (map (fn [[pred]]
                          [pred (eval-pred pred program)]))

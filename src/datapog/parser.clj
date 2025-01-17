@@ -87,7 +87,7 @@
                           (-> % name symbol)
                           %))
               %) xform))
-
+;; Lexer
 (defn- next-token [text]
   (if text
     (let [text (.trim text)
@@ -121,7 +121,22 @@
     [{:type t-eof}]))
 
 
-(defmacro defstate [name dispatch-map body]
+(defmacro defstate
+  "Helper macro to build recursive descent parsers which consumes one (or more) token 
+   for each state transition
+   Defines a transition state as follows
+   (defstate state-name {transition-map}
+    {body}).
+   Transition map defines transitions based on next token {token-1 new-state-1...}.
+   Body is an xform whose evaluation result is used 
+    - as the next accumulated state if a map is returned.
+    - as the next accumuated state, remaining text if a tuple is returned.
+   The latter functionality allows a state to consume more than one token.
+   Three symbols in the body are mapped as follows
+   state -> A map representing current accumulated state of parser
+   token -> Current token
+   text -> Remaining text to be parsed"
+  [name dispatch-map body]
   (let [state-sym (gensym)
         token-sym (gensym)
         text-sym (gensym)
@@ -283,7 +298,9 @@
      program
      (conj rule-body rule-head))))
 
-(defn parse-program [body]
+(defn parse-program
+  "Takes text representing a datalog program and parses it into a map containing rules, relation definitions and facts."
+  [body]
   (loop [program {:rules [] :preds {}} text body]
     (let [[state text] (start nil text {})
           program (cond

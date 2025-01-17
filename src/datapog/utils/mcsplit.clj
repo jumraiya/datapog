@@ -73,7 +73,7 @@
 
 (defn- swap-mapping [incumbent mapping]
   (if (> (count mapping) (count incumbent)) mapping incumbent))
-#trace
+
 (defn- check-edges [mapping v w graph1 graph2]
   (and
    (if (rel/is-disj-node? v graph1)
