@@ -1,6 +1,6 @@
 # Datapog
 
-	Toy datalog engine, mainly for learning purposes. There are mainly two relevant namespaces for now `datapog.parser` and `datapog.engine`.
+Toy datalog engine, mainly for learning purposes. There are mainly two relevant namespaces for now `datapog.parser` and `datapog.engine`.
 	The former parses a datalog program (follows syntax similar to souffle), the latter calculates new facts until a fixed point is reached.
 
 # Usage
